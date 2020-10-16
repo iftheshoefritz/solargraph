@@ -10,11 +10,15 @@ module Solargraph
   # stdlib, and gems.
   #
   class YardMap
-    autoload :Cache,    'solargraph/yard_map/cache'
-    autoload :CoreDocs, 'solargraph/yard_map/core_docs'
-    autoload :CoreGen,  'solargraph/yard_map/core_gen'
-    autoload :Mapper,   'solargraph/yard_map/mapper'
-    autoload :RdocToYard, 'solargraph/yard_map/rdoc_to_yard'
+    autoload :Cache,       'solargraph/yard_map/cache'
+    autoload :CoreDocs,    'solargraph/yard_map/core_docs'
+    autoload :CoreGen,     'solargraph/yard_map/core_gen'
+    autoload :Mapper,      'solargraph/yard_map/mapper'
+    autoload :RdocToYard,  'solargraph/yard_map/rdoc_to_yard'
+    autoload :CoreFills,   'solargraph/yard_map/core_fills'
+    autoload :StdlibFills, 'solargraph/yard_map/stdlib_fills'
+    autoload :Helpers,     'solargraph/yard_map/helpers'
+    autoload :ToMethod,    'solargraph/yard_map/to_method'
 
     CoreDocs.require_minimum
 
@@ -50,6 +54,8 @@ module Solargraph
     def initialize(required: [], gemset: {}, with_dependencies: true)
       # HACK: YardMap needs its own copy of this array
       @required = required.clone
+      # HACK: Hardcoded YAML handling
+      @required.push 'psych' if @required.include?('yaml')
       @with_dependencies = with_dependencies
       @gem_paths = {}
       @stdlib_namespaces = []
@@ -74,6 +80,8 @@ module Solargraph
     # @param new_gemset [Hash{String => String}]
     # @return [Boolean]
     def change new_requires, new_gemset, source_gems = []
+      # HACK: Hardcoded YAML handling
+      new_requires.push 'psych' if new_requires.include?('yaml')
       if new_requires.uniq.sort == required.uniq.sort && new_gemset == gemset && @source_gems.uniq.sort == source_gems.uniq.sort
         false
       else
@@ -158,10 +166,12 @@ module Solargraph
       @cache ||= YardMap::Cache.new
     end
 
+    # @return [Hash]
     def pin_class_hash
       @pin_class_hash ||= pins.to_set.classify(&:class).transform_values(&:to_a)
     end
 
+    # @return [Array<Pin::Base>]
     def pins_by_class klass
       @pin_select_cache[klass] ||= pin_class_hash.select { |key, _| key <= klass }.values.flatten
     end
@@ -179,12 +189,12 @@ module Solargraph
 
     # @return [void]
     def process_requires
-      pins.clear
+      pins.replace core_pins
       unresolved_requires.clear
-      # stdnames = {}
+      environ = Convention.for_global(self)
       done = []
       from_std = []
-      required.each do |r|
+      (required + environ.requires).each do |r|
         next if r.nil? || r.empty? || done.include?(r)
         done.push r
         cached = cache.get_path_pins(r)
@@ -209,7 +219,6 @@ module Solargraph
             yardocs.unshift yd
             result.concat process_yardoc yd, spec
             result.concat add_gem_dependencies(spec) if with_dependencies?
-            stdlib_fill r, result
           end
         rescue Gem::LoadError => e
           base = r.split('/').first
@@ -219,7 +228,6 @@ module Solargraph
           if stdtmp.empty?
             unresolved_requires.push r
           else
-            stdlib_fill base, stdtmp
             result.concat stdtmp
           end
         end
@@ -229,7 +237,12 @@ module Solargraph
           pins.concat result
         end
       end
-      pins.concat core_pins
+      if required.include?('yaml') && required.include?('psych')
+        # HACK: Hardcoded YAML handling
+        pin = path_pin('YAML')
+        pin.instance_variable_set(:@return_type, ComplexType.parse('Module<Psych>'))
+      end
+      pins.concat environ.pins
     end
 
     # @param spec [Gem::Specification]
@@ -327,22 +340,6 @@ module Solargraph
       spec
     end
 
-    # @param path [String]
-    # @param pins [Array<Pin::Base>]
-    # @return [void]
-    def stdlib_fill path, pins
-      StdlibFills.get(path).each do |ovr|
-        pin = pins.select { |p| p.path == ovr.name }.first
-        next if pin.nil?
-        (ovr.tags.map(&:tag_name) + ovr.delete).uniq.each do |tag|
-          pin.docstring.delete_tags tag.to_sym
-        end
-        ovr.tags.each do |tag|
-          pin.docstring.add_tag(tag)
-        end
-      end
-    end
-
     def load_core_pins
       yd = CoreDocs.yardoc_file
       ser = File.join(File.dirname(yd), 'core.ser')
@@ -360,23 +357,7 @@ module Solargraph
       else
         read_core_and_save_cache(yd, ser)
       end
-      # HACK: Add Errno exception classes
-      errno = result.select{ |pin| pin.path == 'Errno' }.first
-      Errno.constants.each do |const|
-        result.push Solargraph::Pin::Namespace.new(type: :class, name: const.to_s, closure: errno)
-        result.push Solargraph::Pin::Reference::Superclass.new(closure: result.last, name: 'SystemCallError')
-      end
-      CoreFills::OVERRIDES.each do |ovr|
-        pin = result.select { |p| p.path == ovr.name }.first
-        next if pin.nil?
-        (ovr.tags.map(&:tag_name) + ovr.delete).uniq.each do |tag|
-          pin.docstring.delete_tags tag.to_sym
-        end
-        ovr.tags.each do |tag|
-          pin.docstring.add_tag(tag)
-        end
-      end
-      result
+      ApiMap::Store.new(result + CoreFills::ALL).pins.reject { |pin| pin.is_a?(Pin::Reference::Override) }
     end
 
     def read_core_and_save_cache yd, ser
@@ -384,7 +365,7 @@ module Solargraph
       load_yardoc yd
       result.concat Mapper.new(YARD::Registry.all).map
       # HACK: Assume core methods with a single `args` parameter accept restarg
-      result.select { |pin| pin.is_a?(Solargraph::Pin::BaseMethod )}.each do |pin|
+      result.select { |pin| pin.is_a?(Solargraph::Pin::Method )}.each do |pin|
         if pin.parameters.length == 1 && pin.parameters.first.name == 'args' && pin.parameters.first.decl == :arg
           # @todo Smelly instance variable access
           pin.parameters.first.instance_variable_set(:@decl, :restarg)
@@ -403,7 +384,7 @@ module Solargraph
 
     def load_stdlib_pins base
       ser = File.join(File.dirname(CoreDocs.yardoc_stdlib_file), "#{base}.ser")
-      if File.file?(ser)
+      result = if File.file?(ser)
         Solargraph.logger.info "Loading #{base} stdlib from cache"
         file = File.open(ser, 'rb')
         dump = file.read
@@ -418,6 +399,11 @@ module Solargraph
       else
         read_stdlib_and_save_cache(base, ser)
       end
+      fills = StdlibFills.get(base)
+      unless fills.empty?
+        result = ApiMap::Store.new(result + fills).pins.reject { |pin| pin.is_a?(Pin::Reference::Override) }
+      end
+      result
     end
 
     def read_stdlib_and_save_cache base, ser

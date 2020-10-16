@@ -1136,7 +1136,7 @@ describe Solargraph::SourceMap::Mapper do
         # @!attribute
       end
     ))
-    attrs = smap.pins.select { |pin| pin.is_a?(Solargraph::Pin::Attribute) }
+    attrs = smap.pins.select { |pin| pin.is_a?(Solargraph::Pin::Method) && pin.attribute? }
     expect(attrs).to be_empty
   end
 
@@ -1456,5 +1456,17 @@ describe Solargraph::SourceMap::Mapper do
     ))
     bar = map.first_pin('Foo#bar')
     expect(bar).to be_explicit
+  end
+
+  it 'separates parameters from local variables' do
+    map = Solargraph::SourceMap.load_string(%(
+      def foo(bar)
+        for i in (bar.length - 1).downto(0) do
+          puts bar[i]
+        end
+      end
+    ))
+    pin = map.first_pin('#foo')
+    expect(pin.parameters.length).to eq(1)
   end
 end
