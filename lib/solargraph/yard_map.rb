@@ -139,7 +139,7 @@ module Solargraph
     # @param path [String]
     # @return [Pin::Base]
     def path_pin path
-      pins.select{ |p| p.path == path }.first
+      pins.select { |p| p.path == path }.first
     end
 
     # Get the location of a file referenced by a require path.
@@ -157,6 +157,10 @@ module Solargraph
       nil
     rescue Gem::LoadError
       nil
+    end
+
+    def stdlib_pins
+      @stdlib_pins ||= []
     end
 
     private
@@ -191,6 +195,7 @@ module Solargraph
     def process_requires
       pins.replace core_pins
       unresolved_requires.clear
+      stdlib_pins.clear
       environ = Convention.for_global(self)
       done = []
       from_std = []
@@ -228,6 +233,7 @@ module Solargraph
           if stdtmp.empty?
             unresolved_requires.push r
           else
+            stdlib_pins.concat stdtmp
             result.concat stdtmp
           end
         end
@@ -239,8 +245,9 @@ module Solargraph
       end
       if required.include?('yaml') && required.include?('psych')
         # HACK: Hardcoded YAML handling
+        # @todo Why can't this be handled with an override or a virtual pin?
         pin = path_pin('YAML')
-        pin.instance_variable_set(:@return_type, ComplexType.parse('Module<Psych>'))
+        pin.instance_variable_set(:@return_type, ComplexType.parse('Module<Psych>')) unless pin.nil?
       end
       pins.concat environ.pins
     end

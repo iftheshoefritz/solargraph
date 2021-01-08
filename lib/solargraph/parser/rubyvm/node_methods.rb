@@ -90,7 +90,9 @@ module Solargraph
         end
 
         def convert_hash node
-          return {} unless node?(node) && node.type == :HASH && node?(node.children[0])
+          return {} unless node?(node) && node.type == :HASH
+          return convert_hash(node.children[0].children[1]) if splatted_hash?(node)
+          return {} unless node?(node.children[0])
           result = {}
           index = 0
           until index > node.children[0].children.length - 2
@@ -101,6 +103,21 @@ module Solargraph
             index += 2
           end
           result
+        end
+
+        def splatted_hash? node
+          splatted_node?(node) && node.children[0].children[1].type == :HASH
+        end
+
+        def splatted_node? node
+          node?(node.children[0]) &&
+            [:ARRAY, :LIST].include?(node.children[0].type) &&
+            node.children[0].children[0].nil? &&
+            node?(node.children[0].children[1])
+        end
+
+        def splatted_call? node
+          splatted_node?(node) && node.children[0].children[1].type != :HASH
         end
 
         def node? node

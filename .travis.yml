@@ -1,12 +1,10 @@
 language: ruby
 rvm:
-  - 2.1
-  - 2.2
-  - 2.3
   - 2.4
   - 2.5
   - 2.6
   - 2.7
+  - 3.0
   - jruby-head
 matrix:
   include:
@@ -18,9 +16,9 @@ matrix:
       os: osx
   allow_failures:
     - rvm: jruby-head
-      
+    - rvm: 3.0
 before_install:
-- ruby ./travis-bundler.rb
-- bundle install
+- gem update --system
+- gem install bundler
 before_script: yard gems
 script: rspec

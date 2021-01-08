@@ -147,14 +147,12 @@ module Solargraph
       result = []
       all_variables.each do |pin|
         if pin.return_type.defined?
-          # @todo Somwhere in here we still need to determine if the variable is defined by an external call
           declared = pin.typify(api_map)
           if declared.defined?
             if rules.validate_tags?
               inferred = pin.probe(api_map)
               if inferred.undefined?
                 next if rules.ignore_all_undefined?
-                # next unless internal?(pin) # @todo This might be redundant for variables
                 if declared_externally?(pin)
                   ignored_pins.push pin
                 else
@@ -172,7 +170,6 @@ module Solargraph
             result.push Problem.new(pin.location, "Unresolved type #{pin.return_type} for variable #{pin.name}", pin: pin)
           end
         else
-          # @todo Check if the variable is defined by an external call
           inferred = pin.probe(api_map)
           if inferred.undefined? && declared_externally?(pin)
             ignored_pins.push pin
@@ -227,7 +224,7 @@ module Solargraph
             base = base.base
           end
           closest = found.typify(api_map) if found
-          if !found || closest.defined? || internal?(found)
+          if !found || (closest.defined? && internal_or_core?(found))
             unless ignored_pins.include?(found)
               result.push Problem.new(location, "Unresolved call to #{missing.links.last.word}")
               @marked_ranges.push rng
@@ -313,7 +310,6 @@ module Solargraph
             end
           else
             if par.decl == :kwarg
-              # @todo Problem: missing required keyword argument
               result.push Problem.new(location, "Call to #{pin.path} is missing keyword argument #{par.name}")
             end
           end
@@ -360,7 +356,12 @@ module Solargraph
 
     # @param pin [Pin::Base]
     def internal? pin
+      return false if pin.nil?
       pin.location && api_map.bundled?(pin.location.filename)
+    end
+
+    def internal_or_core? pin
+      internal?(pin) || api_map.yard_map.core_pins.include?(pin) || api_map.yard_map.stdlib_pins.include?(pin)
     end
 
     # @param pin [Pin::Base]
@@ -412,24 +413,28 @@ module Solargraph
       end
       settled_kwargs = 0
       unless unchecked.empty?
-        kwargs = convert_hash(unchecked.last.node)
-        if pin.parameters.any? { |param| [:kwarg, :kwoptarg].include?(param.decl) || param.kwrestarg? }
-          if kwargs.empty?
-            add_params += 1
-          else
-            unchecked.pop
-            pin.parameters.each do |param|
-              next unless param.keyword?
-              if kwargs.key?(param.name.to_sym)
-                kwargs.delete param.name.to_sym
-                settled_kwargs += 1
-              elsif param.decl == :kwarg
-                return [Problem.new(location, "Missing keyword argument #{param.name} to #{pin.path}")]
+        if Parser.is_ast_node?(unchecked.last.node) && splatted_call?(unchecked.last.node)
+          settled_kwargs = pin.parameters.count(&:keyword?)
+        else
+          kwargs = convert_hash(unchecked.last.node)
+          if pin.parameters.any? { |param| [:kwarg, :kwoptarg].include?(param.decl) || param.kwrestarg? }
+            if kwargs.empty?
+              add_params += 1
+            else
+              unchecked.pop
+              pin.parameters.each do |param|
+                next unless param.keyword?
+                if kwargs.key?(param.name.to_sym)
+                  kwargs.delete param.name.to_sym
+                  settled_kwargs += 1
+                elsif param.decl == :kwarg
+                  return [Problem.new(location, "Missing keyword argument #{param.name} to #{pin.path}")]
+                end
               end
-            end
-            kwargs.clear if pin.parameters.any?(&:kwrestarg?)
-            unless kwargs.empty?
-              return [Problem.new(location, "Unrecognized keyword argument #{kwargs.keys.first} to #{pin.path}")]
+              kwargs.clear if pin.parameters.any?(&:kwrestarg?)
+              unless kwargs.empty?
+                return [Problem.new(location, "Unrecognized keyword argument #{kwargs.keys.first} to #{pin.path}")]
+              end
             end
           end
         end
